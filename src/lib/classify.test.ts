@@ -46,3 +46,20 @@ describe('srs', () => {
     expect(b.attempts).toBe(2);
   });
 });
+
+import { buildFrames, summarise } from './line';
+
+describe('line', () => {
+  const fen = 'rnbqkbnr/pppp1ppp/8/4p3/4P3/8/PPPP1PPP/RNBQKBNR w KQkq - 0 2';
+  it('describes moves in plain language', () => {
+    const frames = buildFrames(fen, ['Qh5', 'Nc6', 'Qxe5+', 'bogus'], 'w');
+    expect(frames.map((f) => f.caption)).toEqual([
+      'Tu joues la dame en h5',
+      'L’adversaire joue le cavalier en c6',
+      'Tu prends le pion en e5 avec échec',
+    ]);
+    expect(frames[2].uci).toBe('h5e5');
+    expect(summarise(fen, frames, 'w')).toBe('Tu gagnes un pion.');
+    expect(summarise(fen, frames, 'b')).toBe('Tu perds un pion.');
+  });
+});

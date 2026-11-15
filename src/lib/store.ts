@@ -138,6 +138,12 @@ export function savePuzzle(p: Puzzle) {
   void persist(set(`p:${p.id}`, p));
 }
 
+/** Merges fields into the stored puzzle, whatever its current review state. */
+export function patchPuzzle(id: string, patch: Partial<Puzzle>) {
+  const cur = state.puzzles.find((x) => x.id === id);
+  if (cur) savePuzzle({ ...cur, ...patch });
+}
+
 export async function resetAll() {
   stopRequested = true;
   await persist(clear());

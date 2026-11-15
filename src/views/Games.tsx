@@ -10,6 +10,7 @@ import type { GameRecord } from '../lib/types';
 type Open = { gameId: string; ply: number } | null;
 
 const date = (t: number) => new Date(t).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short', year: 'numeric' });
+const shortDate = (t: number) => new Date(t).toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' });
 
 export function Games({ open, setOpen }: { open: Open; setOpen: (o: Open) => void }) {
   const s = useStore();
@@ -26,8 +27,8 @@ export function Games({ open, setOpen }: { open: Open; setOpen: (o: Open) => voi
               <th>Date</th>
               <th>Adversaire</th>
               <th>Résultat</th>
-              <th>Cadence</th>
-              <th>Ouverture</th>
+              <th className="hide-sm">Cadence</th>
+              <th className="hide-sm">Ouverture</th>
               <th className="num">Précision</th>
               <th className="num">Erreurs</th>
             </tr>
@@ -36,19 +37,19 @@ export function Games({ open, setOpen }: { open: Open; setOpen: (o: Open) => voi
             {s.games.map((g) => (
               <tr key={g.id} className="clickable" tabIndex={0} onClick={() => setOpen({ gameId: g.id, ply: 0 })}
                 onKeyDown={(e) => e.key === 'Enter' && setOpen({ gameId: g.id, ply: 0 })}>
-                <td>{date(g.endTime)}</td>
+                <td>{shortDate(g.endTime)}</td>
                 <td>
                   <span className={`side ${g.userColor === 'w' ? 'black' : 'white'}`} title={g.userColor === 'w' ? 'Tu avais les Blancs' : 'Tu avais les Noirs'} />
                   {g.oppName} <span className="muted">({g.oppRating})</span>
                 </td>
                 <td><span className={`result ${g.result}`}>{RESULT_LABEL[g.result]}</span></td>
-                <td>{TIME_CLASS_LABEL[g.timeClass] ?? g.timeClass}</td>
-                <td>{g.opening}</td>
+                <td className="hide-sm">{TIME_CLASS_LABEL[g.timeClass] ?? g.timeClass}</td>
+                <td className="hide-sm">{g.opening}</td>
                 {g.analysis ? (
                   <>
                     <td className="num">{g.analysis.accuracy.toFixed(1)} %</td>
                     <td className="num">
-                      {g.analysis.counts.blunder} gaffe{g.analysis.counts.blunder > 1 ? 's' : ''} · {g.analysis.counts.mistake} err.
+                      {g.analysis.counts.blunder}?? · {g.analysis.counts.mistake}?
                     </td>
                   </>
                 ) : (

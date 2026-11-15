@@ -99,7 +99,7 @@ export function Dashboard({ onTrain }: { onTrain: (f: Filter | null) => void }) 
                 <th className="num">Parties</th>
                 <th className="num">Score</th>
                 <th className="num">Précision</th>
-                <th className="num">Erreurs graves / partie</th>
+                <th className="num hide-sm">Erreurs graves / partie</th>
               </tr>
             </thead>
             <tbody>
@@ -109,7 +109,7 @@ export function Dashboard({ onTrain }: { onTrain: (f: Filter | null) => void }) 
                   <td className="num">{o.games}</td>
                   <td className="num">{o.score.toFixed(0)} %</td>
                   <td className="num">{o.accuracy.toFixed(1)} %</td>
-                  <td className="num">{o.errors.toFixed(1)}</td>
+                  <td className="num hide-sm">{o.errors.toFixed(1)}</td>
                 </tr>
               ))}
             </tbody>

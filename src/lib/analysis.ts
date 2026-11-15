@@ -125,6 +125,7 @@ export async function analyseGame(
         bestUci: best,
         bestSan: bestMove.san,
         line: lineToSan(m.before, results[i].pv),
+        refutation: lineToSan(m.before, [ply.uci, ...results[i + 1].pv]),
         loss,
         cls: ply.cls,
         phase: ply.phase,

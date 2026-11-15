@@ -74,6 +74,8 @@ export interface Puzzle {
   bestUci: string;
   bestSan: string;
   line: string[]; // best line in SAN
+  /** The played move followed by the engine's punishment, in SAN. Filled lazily for older puzzles. */
+  refutation?: string[];
   loss: number;
   cls: MoveClass;
   phase: Phase;
