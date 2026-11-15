@@ -133,6 +133,19 @@ interface SolverProps {
 
 type DemoKind = 'best' | 'played';
 
+/**
+ * Follow-up after the first move: the trainee keeps playing the best line.
+ * `step` moves of the line are on the board. In phase `auto` the next move is
+ * played for them (opponent replies, or a move they asked to be shown).
+ */
+interface Follow {
+  step: number;
+  phase: 'auto' | 'me' | 'checking' | 'done';
+  preview: boolean;
+  /** A good move that leaves the engine line: shown on the board, ends the follow-up. */
+  alt?: { fen: string; uci: string };
+}
+
 function Solver({ puzzle, remaining, openGame, onResult, onNext }: SolverProps) {
   const s = useStore();
   const game = s.games.find((g) => g.id === puzzle.gameId);
@@ -142,8 +155,9 @@ function Solver({ puzzle, remaining, openGame, onResult, onNext }: SolverProps) 
   const [nonce, setNonce] = useState(0);
   const [hint, setHint] = useState(false);
   const [showPlayed, setShowPlayed] = useState(false);
-  const [answer, setAnswer] = useState<{ fen: string; uci: string; san: string } | null>(null);
+  const [answer, setAnswer] = useState<{ fen: string; uci: string } | null>(null);
   const [promo, setPromo] = useState<{ from: string; to: string } | null>(null);
+  const [follow, setFollow] = useState<Follow | null>(null);
   // Animated replay of a line: `step` moves are on the board, `preview` shows the arrow of the next one.
   const [demo, setDemo] = useState<{ kind: DemoKind; step: number; preview: boolean; playing: boolean } | null>(null);
   const moveNo = useMemo(() => new Chess(puzzle.fen).moveNumber(), [puzzle.fen]);
@@ -155,7 +169,11 @@ function Solver({ puzzle, remaining, openGame, onResult, onNext }: SolverProps) 
     }),
     [puzzle.fen, puzzle.line, puzzle.refutation, puzzle.playedSan, puzzle.color],
   );
+  const best = lines.best;
   const frames = demo ? lines[demo.kind] : [];
+  const finished = status === 'solved' || status === 'revealed';
+  const following = !!follow && follow.phase !== 'done';
+  const myTurn = status === 'solving' || follow?.phase === 'me';
 
   const record = (ok: boolean) => {
     if (recorded !== null) return;
@@ -165,23 +183,33 @@ function Solver({ puzzle, remaining, openGame, onResult, onNext }: SolverProps) 
   };
 
   const boardRef = useRef<HTMLDivElement>(null);
-  /** On a phone, bring the board to the top so the replay and its caption fit on one screen. */
+  /** On a phone, bring the board to the top so the board and its caption fit on one screen. */
   const focusBoard = () => {
     if (window.innerWidth <= 640) boardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
-  const startDemo = (kind: DemoKind, step = 0) => {
-    setDemo({ kind, step, preview: false, playing: true });
-  };
+  const startDemo = (kind: DemoKind) => setDemo({ kind, step: 0, preview: false, playing: true });
+
+  /** Follow-up state once `step` moves of the best line are on the board. */
+  const followAt = (step: number): Follow => ({
+    step,
+    preview: false,
+    phase: step >= best.length ? 'done' : best[step].mine ? 'me' : 'auto',
+  });
 
   const reject = (msg: string) => {
-    record(false);
     setFeedback(msg);
-    setStatus('solving');
     setNonce((n) => n + 1);
   };
 
+  const check = async (fen: string) => {
+    engine ??= new Engine();
+    const r = await evalPosition(engine, fen, Math.min(14, s.settings.depth + 1));
+    return { ok: winProb(puzzle.evalBest) - winProb(-r.score) <= TOLERANCE, score: -r.score };
+  };
+
   const play = async (from: string, to: string, promotion?: string) => {
-    const c = new Chess(puzzle.fen);
+    const step = follow?.step ?? 0;
+    const c = new Chess(step ? best[step - 1].fen : puzzle.fen);
     const piece = c.get(from as Parameters<Chess['get']>[0]);
     if (!promotion && piece?.type === 'p' && (to[1] === '8' || to[1] === '1')) {
       setPromo({ from, to });
@@ -189,36 +217,57 @@ function Solver({ puzzle, remaining, openGame, onResult, onNext }: SolverProps) 
     }
     setPromo(null);
     setShowPlayed(false);
+    setHint(false);
     const m = c.move({ from, to, promotion });
     const uci = from + to + (promotion ?? '');
-    const done = (text: string) => {
+
+    if (follow) {
+      // Later moves of the line: practice only, the review result is already recorded.
+      const expected = best[step];
+      if (uci === expected.uci) {
+        setFeedback(step + 1 >= best.length ? 'Exact — tu as trouvé toute la suite.' : 'Exact !');
+        setFollow(followAt(step + 1));
+        return;
+      }
+      setFollow({ ...follow, phase: 'checking' });
+      setFeedback('');
+      const r = await check(c.fen()).catch(() => null);
+      if (r?.ok) {
+        setFeedback(`${m.san} est aussi un bon coup. Le moteur préférait ${expected.san}.`);
+        setFollow({ ...follow, phase: 'done', alt: { fen: c.fen(), uci } });
+      } else {
+        setFollow({ ...follow, phase: 'me' });
+        reject(r ? `${m.san} ne suffit pas (${formatEval(r.score)}). Réessaie.` : `${m.san} n’est pas le coup attendu. Réessaie.`);
+      }
+      return;
+    }
+
+    const done = (text: string, onLine: boolean) => {
       record(true);
-      setAnswer({ fen: c.fen(), uci, san: m.san });
+      setAnswer({ fen: c.fen(), uci });
       setFeedback(text);
       setStatus('solved');
-      if (uci === puzzle.bestUci) startDemo('best', 1);
+      if (onLine) setFollow(followAt(1));
     };
-    if (uci === puzzle.bestUci) return done('Exact — c’est le meilleur coup.');
-    if (uci === puzzle.playedUci) return reject(`${m.san} est le coup que tu as joué dans la partie. Cherche mieux.`);
+    if (uci === puzzle.bestUci) return done(best.length > 1 ? 'Exact — c’est le meilleur coup. Trouve la suite.' : 'Exact — c’est le meilleur coup.', true);
+    if (uci === puzzle.playedUci) {
+      record(false);
+      return reject(`${m.san} est le coup que tu as joué dans la partie. Cherche mieux.`);
+    }
     setStatus('checking');
     setFeedback('');
-    try {
-      engine ??= new Engine();
-      const r = await evalPosition(engine, c.fen(), Math.min(14, s.settings.depth + 1));
-      const lost = winProb(puzzle.evalBest) - winProb(-r.score);
-      if (lost <= TOLERANCE) done(`Bien vu — ${m.san} est aussi un bon coup. Le moteur préfère ${puzzle.bestSan}.`);
-      else reject(`${m.san} ne suffit pas (${formatEval(-r.score)}). Réessaie.`);
-    } catch {
-      reject(`${m.san} n’est pas le coup attendu. Réessaie.`);
-    }
+    const r = await check(c.fen()).catch(() => null);
+    if (r?.ok) return done(`Bien vu — ${m.san} est aussi un bon coup. Le moteur préfère ${puzzle.bestSan}.`, false);
+    record(false);
+    setStatus('solving');
+    reject(r ? `${m.san} ne suffit pas (${formatEval(r.score)}). Réessaie.` : `${m.san} n’est pas le coup attendu. Réessaie.`);
   };
 
-  const finished = status === 'solved' || status === 'revealed';
-
+  const followStep = follow?.step;
   const demoKind = demo?.kind;
   useEffect(() => {
-    if (demoKind) focusBoard();
-  }, [demoKind]);
+    if (demoKind || followStep !== undefined) focusBoard();
+  }, [demoKind, followStep]);
 
   // The mistake arrow is only a reminder: it fades after a moment.
   useEffect(() => {
@@ -243,6 +292,17 @@ function Solver({ puzzle, remaining, openGame, onResult, onNext }: SolverProps) 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [finished, puzzle.refutation]);
 
+  // Moves played for the trainee: show the arrow, then slide the piece.
+  useEffect(() => {
+    if (follow?.phase !== 'auto') return;
+    const t = setTimeout(
+      () => setFollow(follow.preview ? followAt(follow.step + 1) : { ...follow, preview: true }),
+      follow.preview ? 750 : 600,
+    );
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [follow]);
+
   // Replay clock: show the arrow of the next move, then slide the piece.
   useEffect(() => {
     if (!demo?.playing) return;
@@ -259,31 +319,47 @@ function Solver({ puzzle, remaining, openGame, onResult, onNext }: SolverProps) 
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Enter' && finished) onNext(recorded === false);
+      if (e.key === 'Enter' && finished && !following) onNext(recorded === false);
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   });
 
   const goTo = (step: number) => demo && setDemo({ ...demo, step: Math.max(0, Math.min(frames.length, step)), preview: false, playing: false });
+  const nextSquare = (follow ? best[follow.step]?.uci : puzzle.bestUci)?.slice(0, 2);
 
-  let fen = status === 'solved' && answer ? answer.fen : puzzle.fen;
-  let lastMove = status === 'solved' && answer ? answer.uci : undefined;
+  let fen = puzzle.fen;
+  let lastMove: string | undefined;
   let arrows: Arrow[] = [];
   if (demo) {
     fen = demo.step ? frames[demo.step - 1].fen : puzzle.fen;
     lastMove = demo.step ? frames[demo.step - 1].uci : undefined;
     const next = frames[demo.step];
     if (demo.preview && next) arrows = [{ uci: next.uci, brush: !next.mine ? 'blue' : demo.kind === 'played' && demo.step === 0 ? 'red' : 'green' }];
-  } else if (status === 'revealed') {
-    arrows = [{ uci: puzzle.playedUci, brush: 'red' }, { uci: puzzle.bestUci, brush: 'green' }];
+  } else if (follow) {
+    fen = follow.alt?.fen ?? (follow.step ? best[follow.step - 1].fen : puzzle.fen);
+    lastMove = follow.alt?.uci ?? (follow.step ? best[follow.step - 1].uci : undefined);
+    const next = best[follow.step];
+    if (follow.phase === 'auto' && follow.preview && next) arrows = [{ uci: next.uci, brush: next.mine ? 'green' : 'blue' }];
+    if (follow.phase === 'me' && hint && nextSquare) arrows = [{ uci: nextSquare, brush: 'yellow' }];
+  } else if (status === 'solved' && answer) {
+    fen = answer.fen;
+    lastMove = answer.uci;
   } else if (status === 'solving') {
     if (showPlayed) arrows.push({ uci: puzzle.playedUci, brush: 'red' });
-    if (hint) arrows.push({ uci: puzzle.bestUci.slice(0, 2), brush: 'yellow' });
+    if (hint && nextSquare) arrows.push({ uci: nextSquare, brush: 'yellow' });
   }
 
-  const current = demo && demo.step > 0 ? frames[demo.step - 1] : null;
+  const shown = demo ? demo.step : follow && !follow.alt ? follow.step : 0;
+  const shownFrames = demo ? frames : best;
+  const current = shown > 0 ? shownFrames[shown - 1] : null;
   const atEnd = !!demo && demo.step >= frames.length;
+  const idle = status === 'solving' ? 'Déplace une pièce sur l’échiquier.' : follow?.phase === 'me' ? 'À toi : trouve le coup suivant.' : '';
+  const busy = status === 'checking' || follow?.phase === 'checking';
+  const failed = /Réessaie|Cherche mieux|La solution était|Le coup était/.test(feedback);
+  const message =
+    [feedback, /(Réessaie|Cherche mieux|Trouve la suite)\.$/.test(feedback) ? '' : idle].filter(Boolean).join(' ') ||
+    (follow?.phase === 'auto' ? 'L’adversaire répond…' : 'Suite terminée.');
 
   return (
     <div className={finished ? 'solver finished' : 'solver'}>
@@ -314,7 +390,7 @@ function Solver({ puzzle, remaining, openGame, onResult, onNext }: SolverProps) 
         <Board
           fen={fen}
           orientation={puzzle.color}
-          onMove={status === 'solving' ? (f, t) => void play(f, t) : undefined}
+          onMove={myTurn && !demo ? (f, t) => void play(f, t) : undefined}
           lastMove={lastMove}
           arrows={arrows}
           nonce={nonce}
@@ -334,34 +410,36 @@ function Solver({ puzzle, remaining, openGame, onResult, onNext }: SolverProps) 
       <div className="solver-body">
         {finished && (
           <div className="demo">
+            <p className="demo-caption" aria-live="polite">
+              {current ? (
+                <>
+                  <span className={`who ${current.mine ? 'me' : 'opp'}`} />
+                  {current.caption}
+                </>
+              ) : (
+                <span className="muted">{demo ? 'Position de départ' : 'Suite terminée'}</span>
+              )}
+            </p>
+            <div className="demo-steps">
+              {shownFrames.map((f, i) => (
+                <button
+                  key={i}
+                  className={`${f.mine ? 'me' : 'opp'} ${i < shown ? 'done' : ''} ${i === shown - 1 ? 'current' : ''}`}
+                  onClick={() => goTo(i + 1)}
+                  disabled={!demo}
+                  aria-label={demo ? f.caption : `Coup ${i + 1}`}
+                />
+              ))}
+            </div>
+
             {demo ? (
               <>
-                <p className="demo-caption" aria-live="polite">
-                  {current ? (
-                    <>
-                      <span className={`who ${current.mine ? 'me' : 'opp'}`} />
-                      {current.caption}
-                    </>
-                  ) : (
-                    <span className="muted">Position de départ</span>
-                  )}
-                </p>
                 {atEnd && (
                   <p className={`demo-summary ${demo.kind}`}>
                     {summarise(puzzle.fen, frames, puzzle.color)}{' '}
                     <span className="muted">Évaluation : {formatEval(demo.kind === 'best' ? puzzle.evalBest : puzzle.evalPlayed)}</span>
                   </p>
                 )}
-                <div className="demo-steps">
-                  {frames.map((f, i) => (
-                    <button
-                      key={i}
-                      className={`${f.mine ? 'me' : 'opp'} ${i < demo.step ? 'done' : ''} ${i === demo.step - 1 ? 'current' : ''}`}
-                      onClick={() => goTo(i + 1)}
-                      aria-label={f.caption}
-                    />
-                  ))}
-                </div>
                 <div className="demo-controls">
                   <button className="btn" onClick={() => goTo(demo.step - 1)} disabled={demo.step === 0} aria-label="Coup précédent">◀</button>
                   <button
@@ -374,37 +452,44 @@ function Solver({ puzzle, remaining, openGame, onResult, onNext }: SolverProps) 
                 </div>
               </>
             ) : (
-              <p className="muted small">Touche une ligne ci-dessous pour la voir se jouer sur l’échiquier.</p>
+              follow?.phase === 'done' && !follow.alt && (
+                <p className="demo-summary">
+                  {summarise(puzzle.fen, best, puzzle.color)}{' '}
+                  <span className="muted">Évaluation : {formatEval(puzzle.evalBest)}</span>
+                </p>
+              )
             )}
-            <div className="demo-tabs" role="tablist" aria-label="Suite à rejouer">
-              <button role="tab" aria-selected={demo?.kind === 'best'} className={demo?.kind === 'best' ? 'active' : ''} onClick={() => startDemo('best')}>
-                <span>▶ Le bon coup</span>
-                <b>{puzzle.bestSan} · {formatEval(puzzle.evalBest)}</b>
-              </button>
-              <button role="tab" aria-selected={demo?.kind === 'played'} className={demo?.kind === 'played' ? 'active' : ''} onClick={() => startDemo('played')}>
-                <span>▶ Mon coup</span>
-                <b>{puzzle.playedSan} · {formatEval(puzzle.evalPlayed)}</b>
-              </button>
-            </div>
-            <p className="muted small">
-              {puzzle.tags.map((t) => TAG_LABEL[t]).join(' · ')}
-              {recorded !== null &&
-                ` · ${recorded ? `à revoir dans ${INTERVALS[Math.min(INTERVALS.length - 1, puzzle.srs.box)]} j` : 'reviendra dans cette session'}`}
-            </p>
+
+            {!following && (
+              <>
+                <div className="demo-tabs" role="tablist" aria-label="Suite à revoir">
+                  <button role="tab" aria-selected={demo?.kind === 'best'} className={demo?.kind === 'best' ? 'active' : ''} onClick={() => startDemo('best')}>
+                    <span>▶ Revoir le bon coup</span>
+                    <b>{puzzle.bestSan} · {formatEval(puzzle.evalBest)}</b>
+                  </button>
+                  <button role="tab" aria-selected={demo?.kind === 'played'} className={demo?.kind === 'played' ? 'active' : ''} onClick={() => startDemo('played')}>
+                    <span>▶ Voir mon coup puni</span>
+                    <b>{puzzle.playedSan} · {formatEval(puzzle.evalPlayed)}</b>
+                  </button>
+                </div>
+                <p className="muted small">
+                  {puzzle.tags.map((t) => TAG_LABEL[t]).join(' · ')}
+                  {recorded !== null &&
+                    ` · ${recorded ? `à revoir dans ${INTERVALS[Math.min(INTERVALS.length - 1, puzzle.srs.box)]} j` : 'reviendra dans cette session'}`}
+                </p>
+              </>
+            )}
           </div>
         )}
 
-        <div className={`feedback ${status === 'solved' ? 'good' : feedback ? 'bad' : ''}`} role="status">
-          {status === 'checking' ? 'Vérification avec le moteur…' : feedback || 'Déplace une pièce sur l’échiquier.'}
-        </div>
+        {!demo && (
+          <div className={`feedback ${busy || !feedback ? '' : failed ? 'bad' : 'good'}`} role="status">
+            {busy ? 'Vérification avec le moteur…' : message}
+          </div>
+        )}
 
         <div className="row actions">
-          {finished ? (
-            <>
-              <button className="btn primary" onClick={() => onNext(recorded === false)}>Suivant</button>
-              <button className="btn" onClick={() => openGame(puzzle.gameId, puzzle.ply + 1)}>Voir dans la partie</button>
-            </>
-          ) : (
+          {status === 'solving' || status === 'checking' ? (
             <>
               <button className="btn" disabled={status !== 'solving' || hint} onClick={() => { record(false); setHint(true); }}>
                 Indice
@@ -414,13 +499,35 @@ function Solver({ puzzle, remaining, openGame, onResult, onNext }: SolverProps) 
                 disabled={status !== 'solving'}
                 onClick={() => {
                   record(false);
+                  setHint(false);
                   setFeedback(`La solution était ${puzzle.bestSan}.`);
                   setStatus('revealed');
-                  startDemo('best');
+                  setFollow({ step: 0, phase: 'auto', preview: false });
                 }}
               >
                 Voir la solution
               </button>
+            </>
+          ) : following ? (
+            <>
+              <button className="btn" disabled={follow!.phase !== 'me' || hint} onClick={() => setHint(true)}>Indice</button>
+              <button
+                className="btn"
+                disabled={follow!.phase !== 'me'}
+                onClick={() => {
+                  setHint(false);
+                  setFeedback(`Le coup était ${best[follow!.step].san}.`);
+                  setFollow({ ...follow!, phase: 'auto', preview: false });
+                }}
+              >
+                Montrer
+              </button>
+              <button className="btn" onClick={() => onNext(recorded === false)}>Passer</button>
+            </>
+          ) : (
+            <>
+              <button className="btn primary" onClick={() => onNext(recorded === false)}>Suivant</button>
+              <button className="btn" onClick={() => openGame(puzzle.gameId, puzzle.ply + 1)}>Voir dans la partie</button>
             </>
           )}
         </div>
