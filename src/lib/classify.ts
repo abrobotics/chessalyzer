@@ -50,8 +50,8 @@ export function formatEval(cp: number): string {
     const n = MATE - Math.abs(cp);
     return (cp > 0 ? '+' : '-') + (n ? 'M' + n : '#');
   }
-  const v = cp / 100;
-  return (v > 0 ? '+' : '') + v.toFixed(1);
+  const v = Math.round(cp / 10) / 10;
+  return (v > 0 ? '+' : '') + (v === 0 ? '0.0' : v.toFixed(1));
 }
 
 /** Parses "[%clk 0:02:59.9]" annotations, in ply order. */

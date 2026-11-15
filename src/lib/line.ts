@@ -21,7 +21,7 @@ const PIECE: Record<string, string> = {
 const PROMO: Record<string, string> = { q: 'une dame', r: 'une tour', b: 'un fou', n: 'un cavalier' };
 
 /** Plain-language description of a move, from the trainee's point of view. */
-function describe(m: Move, mine: boolean): string {
+export function describe(m: Move, mine: boolean): string {
   const who = mine ? 'Tu' : 'L’adversaire';
   let text: string;
   if (m.san.startsWith('O-O')) text = `${who} ${mine ? 'roques' : 'roque'}`;

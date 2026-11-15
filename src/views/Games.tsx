@@ -2,10 +2,20 @@ import { Chess } from 'chess.js';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Board, type Arrow } from '../components/Board';
 import { EvalChart } from '../components/charts';
+import { evalPosition } from '../lib/analysis';
 import { formatEval } from '../lib/classify';
+import { describe } from '../lib/line';
+import { liveEngine } from '../lib/liveEngine';
 import { CLASS_LABEL, CLASS_MARK, RESULT_LABEL, TAG_LABEL, TIME_CLASS_LABEL } from '../lib/labels';
 import { useStore } from '../lib/store';
 import type { GameRecord } from '../lib/types';
+
+/** One position of a free exploration started from the game. */
+interface Node {
+  fen: string;
+  uci?: string;
+  caption?: string;
+}
 
 type Open = { gameId: string; ply: number } | null;
 
@@ -77,9 +87,46 @@ function Review({ game, startPly, onBack }: { game: GameRecord; startPly: number
   const [cur, setCur] = useState(Math.min(startPly, fens.length - 1));
   const listRef = useRef<HTMLDivElement>(null);
   const last = fens.length - 1;
+  const depth = useStore().settings.depth;
+  // Free exploration: a stack of positions the user (or the engine) played from the game position.
+  const [explore, setExplore] = useState<Node[] | null>(null);
+  const [info, setInfo] = useState<{ fen: string; best: string; bestSan: string; evalW: number } | null>(null);
+  const top = explore ? explore[explore.length - 1] : null;
+
+  useEffect(() => {
+    if (!top) return;
+    let cancelled = false;
+    void evalPosition(liveEngine(), top.fen, depth).then((r) => {
+      if (cancelled) return;
+      const c = new Chess(top.fen);
+      let bestSan = '';
+      try {
+        if (r.best) bestSan = c.move({ from: r.best.slice(0, 2), to: r.best.slice(2, 4), promotion: r.best[4] }).san;
+      } catch {
+        /* no legal best move */
+      }
+      setInfo({ fen: top.fen, best: bestSan ? r.best : '', bestSan, evalW: top.fen.split(' ')[1] === 'w' ? r.score : -r.score });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [top, depth]);
+
+  const exploreMove = (from: string, to: string, promotion?: string) => {
+    if (!explore || !top) return;
+    const c = new Chess(top.fen);
+    try {
+      const m = c.move({ from, to, promotion: promotion ?? 'q' });
+      setExplore([...explore, { fen: c.fen(), uci: m.from + m.to + (m.promotion ?? ''), caption: describe(m, m.color === game.userColor) }]);
+    } catch {
+      /* illegal: ignore */
+    }
+  };
+  const ready = !!top && info?.fen === top.fen;
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (explore) return;
       if (e.key === 'ArrowLeft') setCur((c) => Math.max(0, c - 1));
       else if (e.key === 'ArrowRight') setCur((c) => Math.min(last, c + 1));
       else return;
@@ -87,10 +134,13 @@ function Review({ game, startPly, onBack }: { game: GameRecord; startPly: number
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [last]);
+  }, [last, explore]);
 
   useEffect(() => {
-    listRef.current?.querySelector('.current')?.scrollIntoView({ block: 'nearest' });
+    // Scroll the move list only — never the page, so the board stays where it is.
+    const list = listRef.current;
+    const el = list?.querySelector<HTMLElement>('.current');
+    if (list && el) list.scrollTop = el.offsetTop - list.offsetTop - list.clientHeight / 2 + el.offsetHeight / 2;
   }, [cur]);
 
   const sans = useMemo(() => {
@@ -111,18 +161,48 @@ function Review({ game, startPly, onBack }: { game: GameRecord; startPly: number
     <div className="review">
       <div className="review-board">
         <Board
-          fen={isError ? fens[cur - 1] : fens[cur]}
+          fen={top ? top.fen : isError ? fens[cur - 1] : fens[cur]}
           orientation={game.userColor}
-          lastMove={!isError && cur > 0 && a ? a.plies[cur - 1].uci : undefined}
-          arrows={arrows}
+          lastMove={top ? top.uci : !isError && cur > 0 && a ? a.plies[cur - 1].uci : undefined}
+          arrows={top ? (ready && info!.best ? [{ uci: info!.best, brush: 'green' }] : []) : arrows}
+          onMove={top ? exploreMove : undefined}
         />
-        <div className="nav">
-          <button className="btn" onClick={() => setCur(0)} disabled={cur === 0} aria-label="Début">⏮</button>
-          <button className="btn" onClick={() => setCur(cur - 1)} disabled={cur === 0} aria-label="Coup précédent">◀</button>
-          <button className="btn" onClick={() => setCur(cur + 1)} disabled={cur === last} aria-label="Coup suivant">▶</button>
-          <button className="btn" onClick={() => setCur(last)} disabled={cur === last} aria-label="Fin">⏭</button>
-          <button className="btn" disabled={!nextError} onClick={() => nextError && setCur(nextError)}>Erreur suivante</button>
-        </div>
+        {explore ? (
+          <div className="nav exploring">
+            <button className="btn" disabled={explore.length < 2} onClick={() => setExplore(explore.slice(0, -1))}>Annuler</button>
+            <button className="btn primary" disabled={!ready || !info!.best} onClick={() => exploreMove(info!.best.slice(0, 2), info!.best.slice(2, 4), info!.best[4])}>
+              ▶ Meilleur coup
+            </button>
+            <button className="btn" onClick={() => setExplore(null)}>Quitter</button>
+          </div>
+        ) : (
+          <div className="nav">
+            <button className="btn" onClick={() => setCur(0)} disabled={cur === 0} aria-label="Début">⏮</button>
+            <button className="btn" onClick={() => setCur(cur - 1)} disabled={cur === 0} aria-label="Coup précédent">◀</button>
+            <button className="btn" onClick={() => setCur(cur + 1)} disabled={cur === last} aria-label="Coup suivant">▶</button>
+            <button className="btn" onClick={() => setCur(last)} disabled={cur === last} aria-label="Fin">⏭</button>
+            <button className="btn wide" disabled={!nextError} onClick={() => nextError && setCur(nextError)}>Erreur suivante</button>
+            <button className="btn wide" onClick={() => { setInfo(null); setExplore([{ fen: isError ? fens[cur - 1] : fens[cur] }]); }}>
+              Explorer les meilleurs coups
+            </button>
+          </div>
+        )}
+        {explore && (
+          <div className="explore" role="status">
+            <b>{top!.caption ?? (isError ? 'Position avant ton erreur' : 'Position de la partie')}</b>
+            <div className="explore-eval">
+              {ready ? (
+                <>
+                  <span>Évaluation <b>{formatEval(info!.evalW)}</b></span>
+                  <span>{info!.bestSan ? <>Meilleur coup <b>{info!.bestSan}</b> (flèche verte)</> : 'Partie terminée'}</span>
+                </>
+              ) : (
+                <span>Le moteur réfléchit…</span>
+              )}
+            </div>
+            <span className="muted small">Joue n’importe quel coup sur l’échiquier, pour toi ou pour l’adversaire.</span>
+          </div>
+        )}
       </div>
 
       <div className="review-side">

@@ -1,9 +1,9 @@
 import { Chess } from 'chess.js';
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Board, type Arrow } from '../components/Board';
 import { evalPosition, lineToSan } from '../lib/analysis';
 import { formatEval, winProb } from '../lib/classify';
-import { Engine } from '../lib/engine';
+import { liveEngine } from '../lib/liveEngine';
 import { CLASS_LABEL, CLASS_MARK, PHASE_LABEL, TAG_LABEL } from '../lib/labels';
 import { buildFrames, summarise } from '../lib/line';
 import { INTERVALS, MASTERED_BOX, review } from '../lib/srs';
@@ -11,7 +11,6 @@ import { filterLabel, matchesFilter, type Filter } from '../lib/stats';
 import { patchPuzzle, savePuzzle, useStore } from '../lib/store';
 import type { Phase, Puzzle, Tag } from '../lib/types';
 
-let engine: Engine | null = null;
 /** How many win-probability points below the best move still counts as a good answer. */
 const TOLERANCE = 5;
 
@@ -182,11 +181,6 @@ function Solver({ puzzle, remaining, openGame, onResult, onNext }: SolverProps) 
     onResult(ok);
   };
 
-  const boardRef = useRef<HTMLDivElement>(null);
-  /** On a phone, bring the board to the top so the board and its caption fit on one screen. */
-  const focusBoard = () => {
-    if (window.innerWidth <= 640) boardRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  };
   const startDemo = (kind: DemoKind) => setDemo({ kind, step: 0, preview: false, playing: true });
 
   /** Follow-up state once `step` moves of the best line are on the board. */
@@ -202,8 +196,7 @@ function Solver({ puzzle, remaining, openGame, onResult, onNext }: SolverProps) 
   };
 
   const check = async (fen: string) => {
-    engine ??= new Engine();
-    const r = await evalPosition(engine, fen, Math.min(14, s.settings.depth + 1));
+    const r = await evalPosition(liveEngine(), fen, Math.min(14, s.settings.depth + 1));
     return { ok: winProb(puzzle.evalBest) - winProb(-r.score) <= TOLERANCE, score: -r.score };
   };
 
@@ -263,12 +256,6 @@ function Solver({ puzzle, remaining, openGame, onResult, onNext }: SolverProps) 
     reject(r ? `${m.san} ne suffit pas (${formatEval(r.score)}). Réessaie.` : `${m.san} n’est pas le coup attendu. Réessaie.`);
   };
 
-  const followStep = follow?.step;
-  const demoKind = demo?.kind;
-  useEffect(() => {
-    if (demoKind || followStep !== undefined) focusBoard();
-  }, [demoKind, followStep]);
-
   // The mistake arrow is only a reminder: it fades after a moment.
   useEffect(() => {
     if (!showPlayed) return;
@@ -282,8 +269,7 @@ function Solver({ puzzle, remaining, openGame, onResult, onNext }: SolverProps) 
     let cancelled = false;
     const c = new Chess(puzzle.fen);
     c.move(puzzle.playedSan);
-    engine ??= new Engine();
-    void evalPosition(engine, c.fen(), Math.min(14, s.settings.depth + 1)).then((r) => {
+    void evalPosition(liveEngine(), c.fen(), Math.min(14, s.settings.depth + 1)).then((r) => {
       if (!cancelled) patchPuzzle(puzzle.id, { refutation: lineToSan(puzzle.fen, [puzzle.playedUci, ...r.pv]) });
     });
     return () => {
@@ -386,7 +372,7 @@ function Solver({ puzzle, remaining, openGame, onResult, onNext }: SolverProps) 
         </p>
       </div>
 
-      <div className="solver-board" ref={boardRef}>
+      <div className="solver-board">
         <Board
           fen={fen}
           orientation={puzzle.color}
